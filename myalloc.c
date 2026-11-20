@@ -182,3 +182,74 @@ void my_free(void *ptr) { //this is used to validate the users pointer and mark 
     coalesce();
 }
 
+void *my_calloc(size_t n, size_t size) {//contigous allocation: it is used to allocate memory for n items and set it all to zero
+    
+    if (n != 0 && size > SIZE_MAX / n) {
+        return NULL;
+    }
+
+    size_t total = n * size;
+    void *ptr = my_malloc(total);  //alloccates memory.
+    if (ptr == NULL) {
+        return NULL;
+    }
+
+    memset(ptr, 0, total);
+    return ptr;
+}
+
+void *my_realloc(void *ptr, size_t size) { //reallocation....this resizes an existing allocation to a pointer to the required size.
+    // case 1: NULL pointer behaves like my_malloc(size)
+    if (ptr == NULL) {
+        return my_malloc(size);
+    }
+
+    // case 2: size 0 frees the block and returns NULL
+    if (size == 0) {
+        my_free(ptr);
+        return NULL;
+    }
+
+    block_t *b = header(ptr);
+    if (b->magic != MAGIC || b->free == 1) { //rejects invalid pointers
+        return NULL;
+    }
+
+    size_t need = align_up(size);
+    if (need < size) {
+        return NULL;
+    }
+
+    // case 3: current block is already big enough; split unused tail if possible
+    if (b->size >= need) {
+        split_block(b, need);
+        coalesce(); // coalesce in case the split created a new free block that can be merged with its neighbor
+        return ptr;
+    }
+
+    // case 4: next block is free, physically adjacent, and makes up the difference
+    block_t *nxt = b->next;
+    if (nxt != NULL && nxt->free &&
+        (char *)payload(b) + b->size == (char *)nxt &&
+        b->size + HDR + nxt->size >= need) {
+        b->size += HDR + nxt->size;
+        b->next = nxt->next;
+        if (nxt == tail) {
+            tail = b;
+        }
+        split_block(b, need);
+        return ptr;
+    }
+
+    // case 5: allocate a new block, copy existing data, and free the old block
+    void *new_ptr = my_malloc(size);
+    if (new_ptr == NULL) {
+        return NULL;
+    }
+
+    size_t copy_bytes = b->size < size ? b->size : size;
+    memcpy(new_ptr, ptr, copy_bytes);
+    my_free(ptr);
+    return new_ptr;
+}
+
