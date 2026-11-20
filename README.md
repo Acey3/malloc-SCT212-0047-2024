@@ -12,10 +12,6 @@ make
 
 Run the benchmark (Task 8):
 ```
-make bench
-```
-or by hand:
-```
 gcc -std=c11 -Wall -Wextra -g -O0 -o bench bench.c myalloc.c
 ./bench first
 ./bench best
@@ -62,27 +58,36 @@ All 29 checks also pass under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ## Design Explanation
 
-Every block in my allocator starts with a block_t header containing four fields: size stores the usable payload bytes, next points to the next block in memory, free marks whether the block is available for use so that it can be used by a future malloc(), and magic holds a constant (0x1234567) to detect invalid pointers also a way of preventing buffer overflow . On 64-bit Linux, the struct is 24 bytes, so I round it up to HDR (32 bytes) to keep a 16-byte boundary so that the cpu doesnt become slow since 64 bit cpus requires pointer to sit a memory addresses divisble by 16. When my_malloc returns a pointer, it points to the payload right after HDR. my_free steps back HDR bytes to reach the header. All blocks, both used and free, are kept in one linked list ordered by increasing memory address. Global head and tail pointers track the start and end of this list. When find_fit finds no suitable block, grow() calls sbrk() for at least 64 KB and appends a new free block to tail.Sbrk() is used to grow the heap when it runs out of space. With first-fit, find_fit returns the first free block that fits; with best-fit, it scans the whole list for the smallest fitting block. If the chosen block has at least HDR + 16 spare bytes, split_block carves the remainder into a new free block.After every my_free, coalesce walks the list from head. It merges curr and curr->next only if both are free and (char *)payload(curr) + curr->size == (char *)curr->next. Being next in the list is not enough because libc's malloc can leave a gap between our sbrk chunks. When merging, I add HDR + curr->next->size to curr->size because the second header becomes free payload too. I stay on curr after a merge in case the new neighbor is also free, for instance if we have three free blocks in a row.
+Every block in my allocator starts with a block_t header containing four fields: size stores the usable payload bytes, next points to the next block in memory, free marks whether the block is available for use so that it can be used by a future malloc(), and magic holds a constant (0x1234567) to detect invalid pointers. On 64-bit Linux, the struct is 24 bytes, so I round it up to HDR (32 bytes) to keep a 16-byte boundary so that the cpu doesnt become slow since 64 bit cpus requires pointer to sit a memory addresses divisble by 16. When my_malloc returns a pointer, it points to the payload right after HDR. my_free steps back HDR bytes to reach the header. All blocks, both used and free, are kept in one linked list ordered by increasing memory address. Global head and tail pointers track the start and end of this list. When find_fit finds no suitable block, grow() calls sbrk() for at least 64 KB and appends a new free block to tail.Sbrk() is used to grow the heap when it runs out of space. With first-fit, find_fit returns the first free block that fits; with best-fit, it scans the whole list for the smallest fitting block. If the chosen block has at least HDR + 16 spare bytes, split_block carves the remainder into a new free block.After every my_free, coalesce walks the list from head. It merges curr and curr->next only if both are free and (char *)payload(curr) + curr->size == (char *)curr->next. Being next in the list is not enough because libc's malloc can leave a gap between our sbrk chunks. When merging, I add HDR + curr->next->size to curr->size because the second header becomes free payload too. I stay on curr after a merge in case the new neighbor is also free, for instance if we have three free blocks in a row.
 
 ## Questions
 
 **1. Why must the header size be a multiple of 16 as well as the payload sizes?**
+
 This is because the cpu that is runs these processes are mostly 64 bit cpu's which requires the pointers or data types to be a multiple of 16 since they sit at memory addresses divisible by 16 otherwise the cpus slow down.
 
 **2. Why can printf() inside my_malloc() cause infinite recursion?**
-On its first call, printf() allocates an internal output buffer on the heap by calling malloc(). If my_malloc() (or a malloc wrapper) calls printf(), printf() calls right back into my_malloc(), which calls printf() again until the stack overflows. Formatting into a local char buffer with snprintf() and printing with write() avoids stdio heap allocation completely.
+
+Calling printf() inside my_malloc() causes infinite recursion because printf() uses buffered I/O and internally calls malloc() the first time it runs to allocate its output buffer. When my allocator replaces or intercepts the standard malloc(), printf()'s internal memory request invokes my_malloc() again, which calls printf() again, repeating endlessly until the call stack overflows and crashes the program. To safely print inside my_malloc(), you use unbuffered system calls like write() instead.
 
 **3. Your my_free() is O(n). Which extra field would let you find a block's previous neighbor in O(1), and what is the name of the technique?**
-Adding a struct block *prev pointer to block_t turns the list into a doubly-linked list, letting my_free() jump directly to b->prev in $O(1)$ without walking from head. Alternatively, storing a boundary tag (a footer at the end of each block duplicating its size and free flag) lets my_free() look just before b's header to find the previous block in $O(1)$.
+
+To find a block's previous neighbor in O(1) time, you should add a footer (a duplicate of the header containing the block's size and allocation bit) to the end of each block. This technique is called boundary tag coalescing. By reading the footer located immediately before the current block's header in memory, my_free() can determine the previous block's size and jump straight to its header using simple pointer arithmetic, eliminating the need to traverse the list.
 
 **4. Explain the difference between internal and external fragmentation, and name one place in your allocator where each one comes from.**
+
 Internal fragmentation is wasted space inside an allocated block that the user never asked for,for instance, in my allocator, align_up() rounds a 17-byte request up to 32 bytes, and split_block() leaves remainders smaller than HDR + 16 bytes attached to the used block. External fragmentation is free memory split into scattered holes between live blocks; for instance, when alternating blocks are freed and the remaining used blocks stop coalesce() from merging those holes together.
 
 **5. Why does sbrk() memory never get returned to the OS in your allocator? Describe how you could give back memory at the end of the heap.**
-My grow() function only calls sbrk(+inc) to push the program break upward, and my_free() never calls sbrk(-dec) to lower it. To return trailing free memory, my_free() could check if tail->free is 1, verify (char *)payload(tail) + tail->size == sbrk(0) so nothing else moved the break after it, and if tail->size is large enough (e.g., over 64 KB), unlink tail and call sbrk(-(intptr_t)(HDR + tail->size)).
+
+sbrk() memory is never returned to the OS because the allocator only calls sbrk() with positive increments to expand the heap, and my_free() simply recycles freed blocks into an internal free list for future allocations. Furthermore, because the heap is a single contiguous memory region ending at the program break, memory cannot be returned from the middle of the heap.
+To return memory at the end of the heap, my_free() can first coalesce the newly freed block with its neighbors and then check if the end of that block meets the current program break (sbrk(0)). If it sits at the very end of the heap and exceeds a reasonable size threshold (such as a page size of 4 KB), the allocator can unlink the block from the free list and call sbrk(-size) with a negative argument to lower the program break and release the pages back to the OS.
 
 **6. Two blocks are consecutive in your list but not adjacent in memory. How did this happen, and what does your coalescing code do about it?**
-Between two calls to grow(), libc's own malloc() (called by functions like printf() in the test harness) invoked sbrk() and claimed a chunk of heap addresses between our two blocks. Before merging curr and curr->next, coalesce() checks (char *)payload(curr) + curr->size == (char *)curr->next; because the addresses do not touch across libc's gap, it skips merging them so libc's memory is never corrupted.
+
+My list holds all blocks. Between two of my grow() calls, libc's malloc (used by printf in the test harness) also called sbrk() and took some memory. So my second chunk starts after libc's memory, and there's a gap between the last block of my first chunk and the first block of my second chunk, even though they're next to each other in my list.
+Before merging, coalesce() checks (char *)payload(curr) + curr->size == (char *)curr->next. Across the gap that's false, so the blocks are not merged, and libc's memory isn't swallowed.
+
 
 ## Known Limitations
 
@@ -101,7 +106,7 @@ Between two calls to grow(), libc's own malloc() (called by functions like print
   Used to understand block headers, the free list, splitting, coalescing, and first-fit vs best-fit.
 - OSTEP Chapter 14 "Memory API": https://pages.cs.wisc.edu/~remzi/OSTEP/vm-api.pdf
   Used for the expected behaviour of malloc, free, calloc and realloc.
-- Dan Luu, "Malloc tutorial": https://danluu.com/malloc-tutorial/
+- Dan Luu, "Malloc tutorial": https://danluu.com/malloc-tutorial/  https://courses.grainger.illinois.edu/cs340/fa2023/notes/buildingMalloc.html
   Used to see how a simple allocator uses sbrk() and a header struct.
 - Linux man page for brk/sbrk: https://man7.org/linux/man-pages/man2/brk.2.html
   Used for how sbrk(0) works and the (void *)-1 failure value.
@@ -112,7 +117,7 @@ Between two calls to grow(), libc's own malloc() (called by functions like print
 
 
 **Course material**
-- ICS 2305 Lecture 3 and 4, "Memory Management" (Karanja Mwangi)
+- ICS 2305 Lecture 3 and 4, "Memory Management"
   Used for background on the stack, the heap and dynamic memory allocation.
 
 **AI tools**
