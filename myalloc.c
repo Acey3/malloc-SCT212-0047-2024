@@ -139,4 +139,46 @@ void *my_malloc(size_t size) { //used to allocate memory of the requested size.
     return payload(b);
 }
 
+// coalesce is used to merge free blocks that are adjacent to each other
+static void coalesce(void) {
+    block_t *curr = head;
+    while (curr != NULL && curr->next != NULL) {
+        block_t *nxt = curr->next;
+        // only merge if both are free and nxt starts right where the current block's payload ends
+        if (curr->free && nxt->free &&
+            (char *)payload(curr) + curr->size == (char *)nxt) {
+            curr->size += HDR + nxt->size;
+            curr->next = nxt->next;
+            if (nxt == tail) {
+                tail = curr;
+            }
+            // stay on curr in case the new neighbor is also free for instance if we have three free blocks in a row
+        } else {
+            curr = curr->next;
+        }
+    }
+}
+
+void my_free(void *ptr) { //this is used to validate the users pointer and mark the block as free and coalesce adjacent free blocks
+    if (ptr == NULL) {
+        return;
+    }
+
+    block_t *b = header(ptr);
+
+    if (b->magic != MAGIC) { //wrong magic number means that the pointer is inavalid since the it should match with the magic number in header.
+        const char msg[] = "my_free: invalid pointer\n";
+        write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        return;
+    }
+
+    if (b->free == 1) {
+        const char msg[] = "my_free: double free detected\n";
+        write(STDERR_FILENO, msg, sizeof(msg) - 1); // this is used to send error messages straight to the file descriptor STDERR .
+        return;
+    }
+
+    b->free = 1; //the free is for freeing the block and marks it free and available so that it can be reusablle by future malloc() calls
+    coalesce();
+}
 
