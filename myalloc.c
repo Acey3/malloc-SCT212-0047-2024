@@ -2,9 +2,12 @@
 #include<unistd.h>
 #include<string.h>
 #include<stdint.h>
+#include<stdio.h>
 #include "myalloc.h"
 
 #define MAGIC 0x1234567 //This is a fixed number put in every header so we can tell real blocks from invalid pointers
+
+static fit_policy_t policy = FIT_FIRST; //setting the default policy to first fit
 
 typedef struct block {
     size_t size; //stores the size of the usable payload memory
@@ -79,16 +82,25 @@ static block_t *grow(size_t need) {
 
     return b;
 }
-// first fit is used to find a free vlock that is large enough to fit the requested size.
+
+void set_policy(fit_policy_t p) {// used to choose between first fit and best fit
+    policy = p;
+}
+// it uses both first fit and best fit policies to find a free block that is large enough to fit the requested size.
 static block_t *find_fit(size_t need) {
-    block_t *curr = head;
-    while (curr != NULL) {
-        if (curr->free && curr->size >= need) {
+    block_t *best = NULL;
+    for (block_t *curr = head; curr != NULL; curr = curr->next) {
+        if (!curr->free || curr->size < need) {
+            continue;
+        }
+        if (policy == FIT_FIRST) {
             return curr;
         }
-        curr = curr->next;
+        if (best == NULL || curr->size < best->size) {
+            best = curr;
+        }
     }
-    return NULL;
+    return best;
 }
 
 // splitting is where it finds a free block and split it into two blocks onre for requested space and the other free and it should be able to be a head
@@ -252,4 +264,57 @@ void *my_realloc(void *ptr, size_t size) { //reallocation....this resizes an exi
     my_free(ptr);
     return new_ptr;
 }
+void heap_stats(heap_stats_t *out) {// this is used to fill the heap_stats_t structure with the current state of the heap and it is used for testing and debugging purposes
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->heap_bytes = heap_bytes;
 
+    for (block_t *curr = head; curr != NULL; curr = curr->next) {
+        out->blocks++;
+        if (curr->free) {
+            out->free_blocks++;
+            out->free_bytes += curr->size;
+            if (curr->size > out->largest_free) {
+                out->largest_free = curr->size;
+            }
+        } else {
+            out->used_bytes += curr->size;
+        }
+    }
+}
+void heap_dump(void) {// this is used to print every block in the heap using write(2) and it is used for debugging and testing purposes
+    char buf[128];
+    int idx = 0;
+    for (block_t *curr = head; curr != NULL; curr = curr->next, idx++) {
+        int n = snprintf(buf, sizeof(buf), "[%2d] %p size=%zu %s\n",
+                         idx, (void *)curr, curr->size,
+                         curr->free ? "FREE" : "USED");
+        if (n > 0) {
+            size_t len = (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1;
+            write(STDOUT_FILENO, buf, len);
+        }
+    }
+}
+
+int heap_check(void) { // checks that the heap is consistent, returns 1 if ok and 0 if something is wrong
+    for (block_t *curr = head; curr != NULL; curr = curr->next) {
+        if (curr->magic != MAGIC || (curr->free != 0 && curr->free != 1)) {
+            return 0; // invalid header
+        }
+        if (((uintptr_t)payload(curr) % 16) != 0 || (curr->size % 16) != 0) {
+            return 0; // misaligned payload
+        }
+        if (curr->next != NULL) {
+            if ((uintptr_t)curr->next < (uintptr_t)payload(curr) + curr->size) {
+                return 0; // not in increasing address order
+            }
+            if (curr->free && curr->next->free &&
+                (char *)payload(curr) + curr->size == (char *)curr->next) {
+                return 0; // adjacent free blocks left unmerged
+            }
+        }
+    }
+    return 1;
+}
