@@ -90,18 +90,39 @@ static block_t *find_fit(size_t need) {
     }
     return NULL;
 }
-void *my_malloc(size_t size) {  //malloc here is used to allocate memory of the requested size.
+
+// splitting is where it finds a free block and split it into two blocks onre for requested space and the other free and it should be able to be a head
+static void split_block(block_t *b, size_t need) {
+    if (b->size < need + HDR + 16) {
+        return; // too small to split; give away the entire block
+    }
+
+    // place the new header right after the `need` bytes of payload
+    block_t *rem = (block_t *)((char *)payload(b) + need);
+    rem->size = b->size - need - HDR;
+    rem->next = b->next;
+    rem->free = 1;
+    rem->magic = MAGIC;
+
+    b->size = need;
+    b->next = rem;
+
+    if (b == tail) {
+        tail = rem;
+    }
+}
+
+void *my_malloc(size_t size) { //used to allocate memory of the requested size.
     if (size == 0) {
         return NULL;
     }
 
-    //it rounds up the requested size to the nearest multiple of 16.
     size_t need = align_up(size);
-    
-    if (need < size) {
+    if (need < size) {  // overflow check when the need is less than size it returns NULL
         return NULL;
     }
 
+    //scans the list for the first free block tthat is of the reuired size if there isn't it grows the heap(asks for more memory from the os)
     block_t *b = find_fit(need);
     if (b == NULL) {
         if (grow(need) == NULL) {
@@ -113,6 +134,7 @@ void *my_malloc(size_t size) {  //malloc here is used to allocate memory of the 
         }
     }
 
+    split_block(b, need);
     b->free = 0;
     return payload(b);
 }
