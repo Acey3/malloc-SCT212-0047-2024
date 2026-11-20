@@ -79,7 +79,42 @@ static block_t *grow(size_t need) {
 
     return b;
 }
+// first fit is used to find a free vlock that is large enough to fit the requested size.
+static block_t *find_fit(size_t need) {
+    block_t *curr = head;
+    while (curr != NULL) {
+        if (curr->free && curr->size >= need) {
+            return curr;
+        }
+        curr = curr->next;
+    }
+    return NULL;
+}
+void *my_malloc(size_t size) {  //malloc here is used to allocate memory of the requested size.
+    if (size == 0) {
+        return NULL;
+    }
+
+    //it rounds up the requested size to the nearest multiple of 16.
+    size_t need = align_up(size);
+    
+    if (need < size) {
+        return NULL;
+    }
+
+    block_t *b = find_fit(need);
+    if (b == NULL) {
+        if (grow(need) == NULL) {
+            return NULL;
+        }
+        b = find_fit(need);
+        if (b == NULL) {
+            return NULL;
+        }
+    }
+
+    b->free = 0;
+    return payload(b);
+}
 
 
-
- 
